@@ -1,20 +1,18 @@
 <#
 .SYNOPSIS
-    Identifies and extracts basic info from Prefetch files that do not originate from .exe files.
-.DESCRIPTION
-    Checks C:\Windows\Prefetch for any .pf files where the base executable name 
-    does not end in .exe (e.g., VALEX.TXT-8A9B1C2D.pf).
+    Identifies anomalous Prefetch files and outputs the results to an interactive GUI window.
 #>
 
 # 1. Check for Administrator Privileges
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) {
-    Write-Warning "Access Denied. You must run this script as an Administrator to read C:\Windows\Prefetch."
+    Write-Warning "Access Denied. You must run this script as an Administrator."
     break
 }
 
 $prefetchPath = "$env:windir\Prefetch"
 $suspiciousFiles = @()
+$parsedResults = @() # Array to hold our structured objects for the GUI
 
 Write-Host "Scanning $prefetchPath for anomalous prefetch files..." -ForegroundColor Cyan
 
@@ -22,46 +20,32 @@ Write-Host "Scanning $prefetchPath for anomalous prefetch files..." -ForegroundC
 $pfFiles = Get-ChildItem -Path $prefetchPath -Filter "*.pf" -File
 
 foreach ($file in $pfFiles) {
-    # Windows Prefetch format is typically [EXECUTABLE_NAME]-[HASH].pf
-    # We find the last hyphen to separate the name from the hash.
     $lastDashIndex = $file.Name.LastIndexOf('-')
     
     if ($lastDashIndex -gt 0) {
         $originalName = $file.Name.Substring(0, $lastDashIndex)
         
-        # 3. Filter: Check if the original name does NOT end with .exe (Case-Insensitive)
-        # Note: You can add other valid extensions here if needed, like '(?i)\.(exe|scr|com)$'
+        # Filter: Check if the original name does NOT end with .exe (Case-Insensitive)
         if ($originalName -notmatch '(?i)\.exe$') {
             $suspiciousFiles += $file
         }
     }
 }
 
-# 4. Output and Basic "Parsing"
-if ($suspiciousFiles.Count -eq 0) {
-    Write-Host "Clean: No non-executable prefetch files found." -ForegroundColor Green
-} else {
-    Write-Host "`nFound $($suspiciousFiles.Count) anomalous prefetch files:`n" -ForegroundColor Yellow
-    
+# 3. Parse and Structure the Data
+if ($suspiciousFiles.Count -gt 0) {
+    Write-Host "Found $($suspiciousFiles.Count) anomalous files. Extracting data and launching viewer..." -ForegroundColor Yellow
+
     foreach ($sus in $suspiciousFiles) {
-        Write-Host "---------------------------------------------------"
-        Write-Host "Suspicious File : $($sus.Name)" -ForegroundColor Red
-        Write-Host "Full Path       : $($sus.FullName)"
-        Write-Host "File Size       : $($sus.Length) bytes"
-        Write-Host "Created         : $($sus.CreationTime)"
-        Write-Host "Last Modified   : $($sus.LastWriteTime)"
-        
+        $extractedPathsString = ""
+
         # Basic parsing attempt: Extracting readable strings
-        Write-Host "`nAttempting to extract readable strings (Path/DLL indicators)..." -ForegroundColor Gray
         try {
             $bytes = [System.IO.File]::ReadAllBytes($sus.FullName)
-            
-            # Convert bytes to Unicode and ASCII strings to look for paths
             $unicodeStr = [System.Text.Encoding]::Unicode.GetString($bytes)
             $asciiStr = [System.Text.Encoding]::ASCII.GetString($bytes)
             $combined = $unicodeStr + " " + $asciiStr
 
-            # Use regex to find things that look like Windows file paths (C:\... or \Device\...)
             $paths = [regex]::Matches($combined, '([a-zA-Z]:\\[^\0]+|\\Device\\[^\0]+)') | 
                      ForEach-Object { $_.Value -replace '[^\x20-\x7E]', '' } | 
                      Where-Object { $_.Length -gt 5 } | 
@@ -69,15 +53,30 @@ if ($suspiciousFiles.Count -eq 0) {
                      Select-Object -First 5
 
             if ($paths) {
-                foreach ($path in $paths) {
-                    Write-Host "  -> $path" -ForegroundColor DarkCyan
-                }
+                # Join the paths together with a pipe for easier reading in the grid
+                $extractedPathsString = $paths -join "  |  "
             } else {
-                Write-Host "  -> [No clear paths extracted. File may be heavily compressed.]" -ForegroundColor DarkGray
+                $extractedPathsString = "[No clear paths. File is likely MAM compressed.]"
             }
         } catch {
-            Write-Warning "  -> Failed to read file for string extraction."
+            $extractedPathsString = "[Error reading file bytes]"
         }
-        Write-Host "---------------------------------------------------`n"
+
+        # Create a custom object for the GridView
+        $parsedResults += [PSCustomObject]@{
+            "Suspicious File" = $sus.Name
+            "File Size (Bytes)" = $sus.Length
+            "Creation Time"   = $sus.CreationTime.ToString("yyyy-MM-dd HH:mm:ss")
+            "Extracted Paths" = $extractedPathsString
+            "Full Path"       = $sus.FullName
+        }
     }
+
+    # 4. Output to GridView
+    $parsedResults | Out-GridView -Title "Anomalous Prefetch Files Analysis"
+
+} else {
+    # Pop up a clean message box if nothing is found
+    Add-Type -AssemblyName System.Windows.Forms
+    [System.Windows.Forms.MessageBox]::Show("System appears clean. No non-executable prefetch files found.", "Prefetch Scan", "OK", "Information")
 }
